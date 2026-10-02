@@ -1,63 +1,61 @@
-# AlertCopilot — Alert Arbitration Co-Pilot
+# AlertCopilot — Backend
 
-> **Edge-AI backend that monitors safety sensors on heavy machinery (excavators, cranes, loaders), scores every risk signal in real time, arbitrates competing alerts, and surfaces ONE prioritised plain-language instruction to the operator — instead of an overwhelming alert storm.**
+> **An edge-AI backend that arbitrates competing safety alerts on heavy machinery (excavators, cranes, loaders) and surfaces ONE prioritized, plain-language instruction to the operator — eliminating alert fatigue.**
 
 ---
 
 ## How It Works
 
-When multiple danger signals fire simultaneously (e.g. tilt + proximity + engine overload + fatigue), operators cannot safely respond to all of them at once. AlertCopilot solves this with a 5-step pipeline that runs on every sensor reading:
+When a machine is running under tough conditions, multiple sensors can fire simultaneously — proximity, tilt, engine overload, and operator fatigue all at once. Without arbitration, the operator sees all four alerts at the same time and has to decide which one matters most. AlertCopilot does that work automatically.
+
+Every sensor reading goes through a **5-step pipeline**:
 
 ```
-Sensor Reading
-      │
-      ▼
-  [1] Store + Publish (machine_store, event_bus)
-      │
-      ▼
-  [2] Edge Scoring  ──────────────────────────────────────────
-      │   scoring.py                                          │
-      │   • score_proximity()  → 0-100 (spikes inside 1 m)   │
-      │   • score_tilt()       → 0-100 (critical > 25°)      │
-      │   • score_engine()     → 0-100 (temp °C + load %)    │
-      │   • score_fatigue()    → 0-100 (amplified ≥ 70)      │
-      │                                                       │
-      ▼                                                       │
-  [3] Context Filter (apply_context_filter)                   │
-      │   Adjusts scores by task_mode:                        │
-      │   • idle      → engine & fatigue × 0.4               │
-      │   • transport → all × 1.0 (neutral)                  │
-      │   • active    → proximity & tilt × 1.2 (amplified)   │
-      │                                                       │
-      ▼                                                       │
-  [4] Suppression Queue  (suppression.py)                     │
-      │   Per-machine priority queue sorted by adjusted score │
-      │   Top alert → is_suppressed = False                   │
-      │   All others → is_suppressed = True                   │
-      │                                                       │
-      ▼                                                       │
-  [5] LLM Instruction  (llm.py)                              │
-      │   Top alert → Groq LLM (llama-3.1-8b-instant)        │
-      │   On timeout/failure → local fallback templates       │
-      │   Result: one imperative sentence for the operator    │
-      │                                                       │
-      ▼                                                       │
-  Fleet Logger  (storage.py)                                  │
-      └── Appends every alert + instruction to fleet_log.jsonl│
+Sensor Input
+    │
+    ▼
+[1] Edge Scoring          scoring.py
+    Rule-based, per-signal risk score (0–100)
+    │
+    ▼
+[2] Context Filter         scoring.py
+    Adjust scores by task_mode (idle / transport / active)
+    │
+    ▼
+[3] Suppression Queue      suppression.py
+    Priority queue — only the TOP alert stays "active"
+    All others are suppressed
+    │
+    ▼
+[4] Fleet Logging          storage.py
+    Every alert + instruction logged to JSONL
+    │
+    ▼
+[5] LLM Instruction        llm.py
+    Groq (llama-3.1-8b-instant) OR local fallback templates
+    → One short imperative sentence for the operator
 ```
 
 ---
 
-## Tech Stack
+## Project Structure
 
-| Layer | Technology |
-|---|---|
-| API Framework | FastAPI (Python) |
-| LLM Provider | Groq API (`llama-3.1-8b-instant`) |
-| Fallback | Local rule-based templates |
-| Event Bus | MQTT-shaped in-process async bus (`events.py`) |
-| Storage | In-memory state + JSONL fleet log |
-| Server | Uvicorn (ASGI) |
+```
+backend/
+├── main.py           # FastAPI app — all routes + pipeline orchestration
+├── models.py         # Pydantic request/response models
+├── scoring.py        # Rule-based edge scoring + context filter (Steps 1–2)
+├── suppression.py    # Per-machine priority queue — arbitration core (Step 3)
+├── llm.py            # Groq LLM call + fallback template dictionary (Step 5)
+├── storage.py        # In-memory machine state + JSONL fleet logger (Step 4)
+├── simulator.py      # Named demo scenario generators (no sensors needed)
+├── events.py         # MQTT-shaped in-process event bus
+├── verify_pipeline.py # Standalone pipeline smoke test
+├── requirements.txt
+├── .env.example      # Copy to .env and add GROQ_API_KEY
+└── data/
+    └── fleet_log.jsonl   # Auto-created on first run
+```
 
 ---
 
@@ -65,17 +63,16 @@ Sensor Reading
 
 ```bash
 # 1. Install dependencies
-cd backend
 pip install -r requirements.txt
 
 # 2. Set up environment
 cp .env.example .env
-# Open .env and set your GROQ_API_KEY from https://console.groq.com
+# Open .env and set your GROQ_API_KEY (get a free one at https://console.groq.com)
 
 # 3. Start the server
 uvicorn main:app --reload --port 8000
 
-# 4. Open interactive API docs
+# 4. Open the interactive API docs
 # http://localhost:8000/docs
 ```
 
@@ -85,21 +82,101 @@ uvicorn main:app --reload --port 8000
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `GROQ_API_KEY` | **Yes** (for LLM path) | — | Groq API key. Without it, fallback templates are used. |
-| `GROQ_MODEL` | No | `llama-3.1-8b-instant` | Groq model override |
-| `LLM_TIMEOUT_SECONDS` | No | `2` | Seconds before falling back to templates |
-| `FLEET_LOG_PATH` | No | `data/fleet_log.jsonl` | Path to fleet log file |
+| `GROQ_API_KEY` | Yes (for LLM) | — | Groq API key. Without it, fallback templates are used automatically. |
+| `GROQ_MODEL` | No | `llama-3.1-8b-instant` | Override the Groq model |
+| `LLM_TIMEOUT_SECONDS` | No | `2` | Seconds before LLM call times out and falls back to templates |
+| `FLEET_LOG_PATH` | No | `data/fleet_log.jsonl` | Path to the fleet log file |
 
-> **Note:** Never commit a real API key. Copy `.env.example` → `.env` and fill in your key locally.
+> **Tip:** The server works fully offline. If `GROQ_API_KEY` is missing, expired, or times out, the `source` field in the response will read `"fallback"` and a pre-written template instruction is returned instead.
+
+---
+
+## Pipeline Deep Dive
+
+### Step 1 — Sensor Ingest
+
+Two entry points feed data into the pipeline:
+
+- **Live data** → `POST /sensors/ingest` — accepts a JSON body with real sensor readings
+- **Simulated data** → `POST /sensors/simulate` — generates synthetic readings for a named scenario (no physical sensors required)
+
+Both routes call the same internal `_run_pipeline()` function in `main.py`.
+
+---
+
+### Step 2 — Edge Scoring (`scoring.py`)
+
+Each sensor signal is independently converted to a **risk score from 0 to 100** using rule-based threshold curves:
+
+| Signal | Critical (90+) | High (60–89) | Medium (30–59) | Low |
+|---|---|---|---|---|
+| Proximity | < 1 m | 1–3 m | 3–5 m | > 5 m |
+| Tilt | > 25° | 15–25° | 8–15° | < 8° |
+| Engine Temp | > 110°C | 100–110°C | 90–100°C | < 90°C |
+| Engine Load | > 95% | 85–95% | 70–85% | < 70% |
+| Fatigue | ≥ 70 (×1.1) | 40–70 | 20–40 | < 20 |
+
+No ML model is involved — thresholds are explicit and tunable without retraining anything.
+
+---
+
+### Step 3 — Context Filter (`scoring.py`)
+
+After raw scoring, each score is multiplied by a **task_mode modifier** before entering the suppression queue:
+
+| Alert Type | `idle` | `transport` | `active` |
+|---|---|---|---|
+| proximity | ×1.0 | ×1.0 | **×1.2** |
+| tilt | ×1.0 | ×1.0 | **×1.2** |
+| engine | **×0.4** | ×1.0 | ×1.0 |
+| fatigue | **×0.4** | ×1.0 | ×1.0 |
+
+**Safety guard:** In `idle` mode, `tilt` and `proximity` alerts that already score ≥ 60 are *never* dampened — a machine tipping over is critical regardless of what it's doing.
+
+---
+
+### Step 4 — Suppression Queue (`suppression.py`)
+
+A **thread-safe, per-machine priority queue** holds all scored alerts sorted by `adjusted_score` descending.
+
+- The **top alert** (`is_top: true`) is the only one shown to the operator.
+- All other alerts are **held suppressed** — visible in the queue for analytics but not surfaced to the operator.
+- The queue is **replaced on every new sensor reading** — it always reflects the current machine state.
+
+This is the core of the alert arbitration: when 4 alerts fire simultaneously, exactly 1 wins.
+
+---
+
+### Step 5 — LLM Instruction Generation (`llm.py`)
+
+The top alert's type, score, and context are sent to **Groq's API** (`llama-3.1-8b-instant`) with a tight prompt:
+
+```
+Given this machine safety alert: proximity, severity 100/100, context: distance_m=0.8.
+Respond with ONE short imperative safety instruction sentence (max 12 words)
+a heavy machinery operator can act on immediately.
+No preamble, no explanation — just the instruction.
+```
+
+**Automatic fallback:** If Groq is unavailable, times out (default: 2s), or returns an error, a **local template dictionary** is used instead. The `source` field in the response shows `"llm"` or `"fallback"`.
+
+Example fallback templates:
+
+| Alert | Severity | Instruction |
+|---|---|---|
+| proximity | critical | *Stop immediately — obstacle within 1 metre, do not move.* |
+| tilt | high | *Cease digging — tilt angle dangerously high, level the machine now.* |
+| engine | critical | *Shut down engine immediately — critical overtemperature or overload detected.* |
+| fatigue | high | *Park machine safely and rest — operator fatigue is dangerously high.* |
 
 ---
 
 ## API Reference
 
-### 🟢 Sensor Layer
+### Sensor Layer
 
 #### `POST /sensors/ingest`
-Ingest a live sensor reading. Immediately runs the full scoring → suppression → logging pipeline.
+Ingest a real sensor reading and run the full pipeline immediately.
 
 ```bash
 curl -X POST http://localhost:8000/sensors/ingest \
@@ -115,13 +192,14 @@ curl -X POST http://localhost:8000/sensors/ingest \
   }'
 ```
 
-All sensor fields are optional — only fields provided will produce alerts.
+All sensor fields are optional — only the fields present in the payload are scored.
+
+---
 
 #### `POST /sensors/simulate`
-Trigger a named demo scenario — no physical sensors required.
+Trigger a named demo scenario without physical sensors.
 
 ```bash
-# Flagship demo: four concurrent risks → one winner
 curl -X POST http://localhost:8000/sensors/simulate \
   -H "Content-Type: application/json" \
   -d '{"machine_id": "EXC-001", "scenario": "multi_alert"}'
@@ -131,12 +209,14 @@ curl -X POST http://localhost:8000/sensors/simulate \
 
 | Scenario | What it simulates |
 |---|---|
-| `tilt_critical` | Excavator at 28° tilt — imminent tip-over |
-| `proximity_warning` | Loader 2.3 m from obstacle |
-| `multi_alert` | ⭐ Four concurrent risks (flagship demo) |
-| `fatigue_high` | Operator fatigue index at 85/100 |
-| `engine_overload` | Engine at 112 °C + 96% load |
-| `all_clear` | All readings nominal |
+| `multi_alert` | ⭐ **Flagship demo** — 4 concurrent risks: proximity 0.8m + tilt 18° + engine 105°C/91% + fatigue 72 |
+| `tilt_critical` | Excavator at 28° tilt (imminent tip-over), active mode |
+| `proximity_warning` | Loader 2.3m from obstacle, transport mode |
+| `fatigue_high` | Operator fatigue at 85/100, idle mode |
+| `engine_overload` | Engine at 112°C and 96% load simultaneously |
+| `all_clear` | All readings nominal — resets the alert queue |
+
+---
 
 #### `GET /sensors/scenarios`
 List all available scenario names.
@@ -147,16 +227,16 @@ curl http://localhost:8000/sensors/scenarios
 
 ---
 
-### 🔴 Alert Queue
+### Alert Queue
 
 #### `GET /alerts/{machine_id}/queue`
-Returns the full prioritised alert queue for a machine. The highest-scoring alert is flagged `is_top: true` — this is the one shown to the operator. All others are held suppressed.
+Returns the full prioritized alert queue for a machine. The top alert is flagged `is_top: true`; all others are suppressed.
 
 ```bash
 curl http://localhost:8000/alerts/EXC-001/queue
 ```
 
-**Example response (multi_alert scenario):**
+**Example response (after `multi_alert` scenario):**
 ```json
 {
   "machine_id": "EXC-001",
@@ -170,15 +250,17 @@ curl http://localhost:8000/alerts/EXC-001/queue
     "timestamp": "2024-01-15T10:29:58Z"
   },
   "suppressed_alerts": [
-    {"alert_type": "tilt",    "adjusted_score": 87.0, "is_top": false},
-    {"alert_type": "fatigue", "adjusted_score": 79.0, "is_top": false},
-    {"alert_type": "engine",  "adjusted_score": 72.0, "is_top": false}
+    {"alert_type": "fatigue",  "adjusted_score": 87.0, "is_top": false},
+    {"alert_type": "tilt",    "adjusted_score": 82.8, "is_top": false},
+    {"alert_type": "engine",  "adjusted_score": 75.0, "is_top": false}
   ]
 }
 ```
 
+---
+
 #### `GET /alerts/{machine_id}/instruction`
-Generates a plain-language instruction for the top alert using Groq LLM (or fallback templates).
+Generates a plain-language operator instruction for the top alert using Groq LLM (or fallback templates).
 
 ```bash
 curl http://localhost:8000/alerts/EXC-001/instruction
@@ -196,24 +278,25 @@ curl http://localhost:8000/alerts/EXC-001/instruction
 }
 ```
 
-The `source` field is either `"llm"` (Groq responded in time) or `"fallback"` (timeout or no key).
-
-> **Testing fallback:** Set `GROQ_API_KEY=bad_key` in `.env` and restart. Instructions still work — zero connectivity required.
+- `source: "llm"` → Groq API was used
+- `source: "fallback"` → local template was used (no API key / timeout / error)
 
 ---
 
-### 📊 Fleet Logging & Analytics
+### Fleet Logging & Analytics
 
 #### `GET /fleet/log`
-Returns recent entries from `data/fleet_log.jsonl` — every alert scored and every instruction generated.
+Returns recent log entries from `data/fleet_log.jsonl`.
 
 ```bash
 curl http://localhost:8000/fleet/log          # last 50 entries (default)
 curl "http://localhost:8000/fleet/log?n=10"   # last 10 entries
 ```
 
+---
+
 #### `GET /fleet/summary`
-Aggregate statistics — run a few simulations first for non-zero counts.
+Aggregate statistics across all machines and sessions.
 
 ```bash
 curl http://localhost:8000/fleet/summary
@@ -236,85 +319,65 @@ curl http://localhost:8000/fleet/summary
 }
 ```
 
-The key metric: **18 of 24 alerts suppressed** — the operator saw 6 clean instructions, not 24 competing warnings.
-
 ---
 
-### ⚙️ System
+### System
 
 #### `GET /health`
-Liveness check — returns 200 if the server is running.
+Liveness check. Returns `200 OK` with all currently tracked machine IDs.
 
 ```bash
 curl http://localhost:8000/health
 ```
 
 #### `GET /docs`
-Interactive Swagger UI — explore and test all endpoints in the browser.
+Interactive Swagger UI — try every endpoint directly in the browser.
 
 ---
 
-## Scoring Logic
+## End-to-End Demo Script
 
-### Raw Score Tiers
-
-| Signal | Critical (90–100) | High (60–89) | Medium (30–59) | Low |
-|---|---|---|---|---|
-| Proximity | < 1 m | 1–3 m | 3–5 m | > 5 m |
-| Tilt | > 25° | 15–25° | 8–15° | < 8° |
-| Engine Temp | > 110 °C | 100–110 °C | 90–100 °C | < 90 °C |
-| Engine Load | > 95% | 85–95% | 70–85% | < 70% |
-| Fatigue Index | ≥ 70 (× 1.1 boost) | 40–70 | 20–40 | < 20 |
-
-### Context Filter Multipliers
-
-| Task Mode | Engine | Fatigue | Proximity | Tilt |
-|---|---|---|---|---|
-| `idle` | × 0.4 | × 0.4 | × 1.0 | × 1.0 |
-| `transport` | × 1.0 | × 1.0 | × 1.0 | × 1.0 |
-| `active` | × 1.0 | × 1.0 | × **1.2** | × **1.2** |
-
-Safety guard: even in `idle` mode, tilt/proximity scores ≥ 60 are **never dampened**.
-
----
-
-## Demo Script
-
-Run this sequence to show the full arbitration pipeline end-to-end:
+Run these four commands in order to walk through the entire system:
 
 ```bash
-# Step 1 — Fire four concurrent risks
+# 1. Trigger the flagship scenario — 4 simultaneous risks on one machine
 curl -X POST http://localhost:8000/sensors/simulate \
   -H "Content-Type: application/json" \
   -d '{"machine_id": "EXC-001", "scenario": "multi_alert"}'
 
-# Step 2 — See arbitration result (4 alerts → 1 winner)
+# 2. See the arbitration result — 4 alerts ranked, 1 winner
 curl http://localhost:8000/alerts/EXC-001/queue
 
-# Step 3 — Get the single operator instruction
+# 3. Get the single plain-language instruction for the operator
 curl http://localhost:8000/alerts/EXC-001/instruction
 
-# Step 4 — Fleet analytics
+# 4. Review fleet analytics
 curl http://localhost:8000/fleet/summary
 ```
 
 ---
 
-## File Structure
+## Event Bus (`events.py`)
 
-```
-backend/
-├── main.py           # FastAPI app, all routes, pipeline orchestration
-├── models.py         # Pydantic models (SensorReading, ScoredAlert, Instruction, ...)
-├── scoring.py        # Rule-based edge scoring + context filter (Steps 2 & 3)
-├── suppression.py    # Per-machine priority queue — arbitration core (Step 4)
-├── llm.py            # Groq API call + local fallback templates (Step 5)
-├── storage.py        # In-memory machine state + JSONL fleet logger
-├── simulator.py      # Named demo scenario generators
-├── events.py         # MQTT-shaped in-process async event bus
-├── verify_pipeline.py # Quick smoke-test script (no server needed)
-├── requirements.txt
-├── .env.example      # Copy to .env and set GROQ_API_KEY
-└── data/
-    └── fleet_log.jsonl   # Auto-created on first ingest/simulate call
-```
+An MQTT-shaped **in-process event bus** publishes three topic types on every pipeline run:
+
+| Topic | Published when |
+|---|---|
+| `sensor/{machine_id}/reading` | Raw sensor data received |
+| `sensor/{machine_id}/alerts_scored` | All scored alerts computed |
+| `sensor/{machine_id}/alert_active` | Top alert determined |
+
+This is designed to be a drop-in replacement for a real MQTT broker — swap `event_bus.publish()` with an actual `paho-mqtt` client when deploying to hardware.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Web framework | FastAPI + Uvicorn |
+| LLM | Groq API (`llama-3.1-8b-instant`) |
+| HTTP client | `httpx` (async) |
+| Data validation | Pydantic v2 |
+| Fleet logging | JSONL flat file (`data/fleet_log.jsonl`) |
+| Concurrency | Python `asyncio` + `threading.RLock` for queue safety |
