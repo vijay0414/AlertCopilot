@@ -1,4 +1,4 @@
-# AlertCopilot — Backend
+# AlertCopilot
 
 > **An edge-AI backend that arbitrates competing safety alerts on heavy machinery (excavators, cranes, loaders) and surfaces ONE prioritized, plain-language instruction to the operator — eliminating alert fatigue.**
 
