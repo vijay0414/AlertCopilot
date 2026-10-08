@@ -1,4 +1,4 @@
-# AlertCopilot
+# AlertCopilot — Alert Arbitration Co-Pilot
 
 > **An edge-AI backend that arbitrates competing safety alerts on heavy machinery (excavators, cranes, loaders) and surfaces ONE prioritized, plain-language instruction to the operator — eliminating alert fatigue.**
 
@@ -67,13 +67,26 @@ pip install -r requirements.txt
 
 # 2. Set up environment
 cp .env.example .env
-# Open .env and set your GROQ_API_KEY (get a free one at https://console.groq.com)
+# Open .env and set your GROQ_API_KEY from https://console.groq.com
 
-# 3. Start the server
-uvicorn main:app --reload --port 8000
+#    Or from the project root:
+#    python start_demo.py
+#    That prints: Open http://<your-lan-ip>:8000/phone on your phone (same WiFi)
 
 # 4. Open the interactive API docs
 # http://localhost:8000/docs
+# Phone sensor page: http://<your-lan-ip>:8000/phone
+```
+
+Dashboard (from `frontend/`):
+
+```bash
+# Optional: point the React app at the backend (default http://localhost:8000)
+# Use an ngrok HTTPS URL here if the phone is going through a tunnel.
+# VITE_API_URL=https://your-tunnel.ngrok.app
+
+npm install
+npm run dev
 ```
 
 ---
@@ -87,87 +100,7 @@ uvicorn main:app --reload --port 8000
 | `LLM_TIMEOUT_SECONDS` | No | `2` | Seconds before LLM call times out and falls back to templates |
 | `FLEET_LOG_PATH` | No | `data/fleet_log.jsonl` | Path to the fleet log file |
 
-> **Tip:** The server works fully offline. If `GROQ_API_KEY` is missing, expired, or times out, the `source` field in the response will read `"fallback"` and a pre-written template instruction is returned instead.
-
----
-
-## Pipeline Deep Dive
-
-### Step 1 — Sensor Ingest
-
-Two entry points feed data into the pipeline:
-
-- **Live data** → `POST /sensors/ingest` — accepts a JSON body with real sensor readings
-- **Simulated data** → `POST /sensors/simulate` — generates synthetic readings for a named scenario (no physical sensors required)
-
-Both routes call the same internal `_run_pipeline()` function in `main.py`.
-
----
-
-### Step 2 — Edge Scoring (`scoring.py`)
-
-Each sensor signal is independently converted to a **risk score from 0 to 100** using rule-based threshold curves:
-
-| Signal | Critical (90+) | High (60–89) | Medium (30–59) | Low |
-|---|---|---|---|---|
-| Proximity | < 1 m | 1–3 m | 3–5 m | > 5 m |
-| Tilt | > 25° | 15–25° | 8–15° | < 8° |
-| Engine Temp | > 110°C | 100–110°C | 90–100°C | < 90°C |
-| Engine Load | > 95% | 85–95% | 70–85% | < 70% |
-| Fatigue | ≥ 70 (×1.1) | 40–70 | 20–40 | < 20 |
-
-No ML model is involved — thresholds are explicit and tunable without retraining anything.
-
----
-
-### Step 3 — Context Filter (`scoring.py`)
-
-After raw scoring, each score is multiplied by a **task_mode modifier** before entering the suppression queue:
-
-| Alert Type | `idle` | `transport` | `active` |
-|---|---|---|---|
-| proximity | ×1.0 | ×1.0 | **×1.2** |
-| tilt | ×1.0 | ×1.0 | **×1.2** |
-| engine | **×0.4** | ×1.0 | ×1.0 |
-| fatigue | **×0.4** | ×1.0 | ×1.0 |
-
-**Safety guard:** In `idle` mode, `tilt` and `proximity` alerts that already score ≥ 60 are *never* dampened — a machine tipping over is critical regardless of what it's doing.
-
----
-
-### Step 4 — Suppression Queue (`suppression.py`)
-
-A **thread-safe, per-machine priority queue** holds all scored alerts sorted by `adjusted_score` descending.
-
-- The **top alert** (`is_top: true`) is the only one shown to the operator.
-- All other alerts are **held suppressed** — visible in the queue for analytics but not surfaced to the operator.
-- The queue is **replaced on every new sensor reading** — it always reflects the current machine state.
-
-This is the core of the alert arbitration: when 4 alerts fire simultaneously, exactly 1 wins.
-
----
-
-### Step 5 — LLM Instruction Generation (`llm.py`)
-
-The top alert's type, score, and context are sent to **Groq's API** (`llama-3.1-8b-instant`) with a tight prompt:
-
-```
-Given this machine safety alert: proximity, severity 100/100, context: distance_m=0.8.
-Respond with ONE short imperative safety instruction sentence (max 12 words)
-a heavy machinery operator can act on immediately.
-No preamble, no explanation — just the instruction.
-```
-
-**Automatic fallback:** If Groq is unavailable, times out (default: 2s), or returns an error, a **local template dictionary** is used instead. The `source` field in the response shows `"llm"` or `"fallback"`.
-
-Example fallback templates:
-
-| Alert | Severity | Instruction |
-|---|---|---|
-| proximity | critical | *Stop immediately — obstacle within 1 metre, do not move.* |
-| tilt | high | *Cease digging — tilt angle dangerously high, level the machine now.* |
-| engine | critical | *Shut down engine immediately — critical overtemperature or overload detected.* |
-| fatigue | high | *Park machine safely and rest — operator fatigue is dangerously high.* |
+> **Note:** Never commit a real API key. Copy `.env.example` → `.env` and fill in your key locally.
 
 ---
 
@@ -321,7 +254,7 @@ curl http://localhost:8000/fleet/summary
 
 ---
 
-### System
+### ⚙️ System
 
 #### `GET /health`
 Liveness check. Returns `200 OK` with all currently tracked machine IDs.
